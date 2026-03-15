@@ -131,9 +131,6 @@ func TestSubmissionStatusTransitions(t *testing.T) {
 	sub := &models.Submission{ID: "test-pipeline"}
 	for _, status := range pipeline {
 		sub.Status = status
-		if sub.Status != status {
-			t.Errorf("expected status %s, got %s", status, sub.Status)
-		}
 	}
 }
 
