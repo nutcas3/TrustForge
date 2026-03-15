@@ -22,9 +22,9 @@ import (
 )
 
 const (
-	GuestCID = 3
+	GuestCID    = 3
 	CommandPort = 52
-	ReadyPort = 53
+	ReadyPort   = 53
 )
 
 // Command is sent from host to guest agent
@@ -150,7 +150,7 @@ func (c *HostClient) dialWithRetry(ctx context.Context, port uint32) (net.Conn, 
 	maxBackoff := 500 * time.Millisecond
 	maxAttempts := 10
 
-	for attempt := 0; attempt < maxAttempts; attempt++ {
+	for attempt := range maxAttempts {
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
