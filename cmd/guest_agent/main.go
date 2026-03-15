@@ -87,6 +87,31 @@ func main() {
 	poweroff(0)
 }
 
+// setResourceLimits sets resource limits for the current process
+func setResourceLimits() error {
+	// CPU time limit: 20s soft, 25s hard
+	if err := syscall.Setrlimit(syscall.RLIMIT_CPU, &syscall.Rlimit{Cur: 20, Max: 25}); err != nil {
+		return fmt.Errorf("set CPU limit: %w", err)
+	}
+
+	// Virtual memory: 512MB
+	if err := syscall.Setrlimit(syscall.RLIMIT_AS, &syscall.Rlimit{Cur: 512 * 1024 * 1024, Max: 512 * 1024 * 1024}); err != nil {
+		return fmt.Errorf("set memory limit: %w", err)
+	}
+
+	// Max file size: 10MB
+	if err := syscall.Setrlimit(syscall.RLIMIT_FSIZE, &syscall.Rlimit{Cur: 10 * 1024 * 1024, Max: 10 * 1024 * 1024}); err != nil {
+		return fmt.Errorf("set file size limit: %w", err)
+	}
+
+	// Max open file descriptors: 64
+	if err := syscall.Setrlimit(syscall.RLIMIT_NOFILE, &syscall.Rlimit{Cur: 64, Max: 64}); err != nil {
+		return fmt.Errorf("set nofile limit: %w", err)
+	}
+
+	return nil
+}
+
 // vsockDial opens a vsock connection to the host on the given port.
 // Uses raw syscalls — stdlib net package has no AF_VSOCK support.
 func vsockDial(cid, port uint32) (net.Conn, error) {
