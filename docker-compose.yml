@@ -1,0 +1,92 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: trustforge:latest
+    container_name: trustforge-api
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+      - "50051:50051"   # gRPC
+      - "9090:9090"     # Prometheus metrics
+    environment:
+      TRUSTFORGE_DATABASE_HOST: postgres
+      TRUSTFORGE_DATABASE_PASSWORD: ${DB_PASSWORD:-trustforge}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+    volumes:
+      # Firecracker images and snapshots (must be on host filesystem with KVM)
+      - /var/lib/trustforge:/var/lib/trustforge
+      - /var/run/trustforge:/var/run/trustforge
+      # KVM device passthrough for Firecracker
+      - /dev/kvm:/dev/kvm
+    devices:
+      - /dev/kvm:/dev/kvm
+    cap_add:
+      - NET_ADMIN   # needed for Firecracker network setup
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - trustforge
+  postgres:
+    image: postgres:18-alpine
+    container_name: trustforge-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: trustforge
+      POSTGRES_USER: trustforge
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-trustforge}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U trustforge"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - trustforge
+
+  prometheus:
+    image: prom/prometheus:v2.52.0
+    container_name: trustforge-prometheus
+    restart: unless-stopped
+    ports:
+      - "9091:9090"
+    volumes:
+      - ./deploy/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.retention.time=30d"
+    networks:
+      - trustforge
+
+  grafana:
+    image: grafana/grafana:10.4.0
+    container_name: trustforge-grafana
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./deploy/grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./deploy/grafana/datasources:/etc/grafana/provisioning/datasources:ro
+    depends_on:
+      - prometheus
+    networks:
+      - trustforge
+
+volumes:
+  postgres_data:
+  prometheus_data:
+  grafana_data:
+
+networks:
+  trustforge:
+    driver: bridge
