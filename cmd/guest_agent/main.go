@@ -16,9 +16,11 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -37,12 +39,13 @@ const (
 	maxOutputBytes = 1 * 1024 * 1024 // 1MB cap on stdout/stderr
 
 	// Resource limits
-	cpuLimitSoft    = 20  // seconds
-	cpuLimitHard    = 25  // seconds
-	memLimitMB      = 512 // MB
-	fileSizeLimitMB = 10  // MB
-	maxOpenFiles    = 64
-	wallTimeoutSec  = 25 // seconds
+	cpuLimitSoft            = 20  // seconds
+	cpuLimitHard            = 25  // seconds
+	memLimitMB              = 512 // MB
+	fileSizeLimitMB         = 10  // MB
+	maxOpenFiles            = 64
+	wallTimeoutSec          = 30 // seconds (longer than CPU hard limit)
+	maxConnectionsPerMinute = 10
 )
 
 // Command is sent from host to guest agent via vsock
@@ -63,6 +66,37 @@ type Result struct {
 	TimedOut     bool    `json:"timed_out"`
 }
 
+// Rate limiting state
+var (
+	connectionTimes []time.Time
+	connMutex       sync.Mutex
+)
+
+// checkRateLimit returns true if the connection should be allowed
+func checkRateLimit() bool {
+	connMutex.Lock()
+	defer connMutex.Unlock()
+
+	now := time.Now()
+	// Remove connections older than 1 minute
+	cutoff := now.Add(-time.Minute)
+	validConnections := []time.Time{}
+	for _, t := range connectionTimes {
+		if t.After(cutoff) {
+			validConnections = append(validConnections, t)
+		}
+	}
+
+	// Check if we've exceeded the limit
+	if len(validConnections) >= maxConnectionsPerMinute {
+		return false
+	}
+
+	// Add current connection time
+	connectionTimes = append(validConnections, now)
+	return true
+}
+
 // sockaddrVM is the raw vsock sockaddr for syscall.Bind / syscall.Connect
 type sockaddrVM struct {
 	Family    uint16
@@ -74,6 +108,15 @@ type sockaddrVM struct {
 
 func main() {
 	logf("guest-agent starting (pid %d)", os.Getpid())
+
+	// Setup signal handling for graceful shutdown
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGTERM, syscall.SIGINT)
+	go func() {
+		sig := <-sigChan
+		logf("received signal %v, shutting down gracefully", sig)
+		poweroff(0)
+	}()
 
 	// Mount task disk — may fail during snapshot warm-up (no vdb present)
 	if err := mountTaskDisk(); err != nil {
@@ -265,6 +308,14 @@ func serveOne() error {
 		if a.err != nil {
 			return fmt.Errorf("accept: %w", a.err)
 		}
+
+		// Check rate limiting before processing connection
+		if !checkRateLimit() {
+			logf("connection rate limited - too many connections")
+			a.conn.Close()
+			return fmt.Errorf("rate limited: too many connections per minute")
+		}
+
 		defer a.conn.Close()
 		return handleConn(a.conn)
 	case <-time.After(120 * time.Second):
