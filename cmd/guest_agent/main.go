@@ -19,6 +19,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 	"unsafe"
@@ -34,6 +35,14 @@ const (
 	taskDevice     = "/dev/vdb"
 	taskMount      = "/task"
 	maxOutputBytes = 1 * 1024 * 1024 // 1MB cap on stdout/stderr
+
+	// Resource limits
+	cpuLimitSoft    = 20  // seconds
+	cpuLimitHard    = 25  // seconds
+	memLimitMB      = 512 // MB
+	fileSizeLimitMB = 10  // MB
+	maxOpenFiles    = 64
+	wallTimeoutSec  = 25 // seconds
 )
 
 // Command is sent from host to guest agent via vsock
@@ -90,22 +99,22 @@ func main() {
 // setResourceLimits sets resource limits for the current process
 func setResourceLimits() error {
 	// CPU time limit: 20s soft, 25s hard
-	if err := syscall.Setrlimit(syscall.RLIMIT_CPU, &syscall.Rlimit{Cur: 20, Max: 25}); err != nil {
+	if err := syscall.Setrlimit(syscall.RLIMIT_CPU, &syscall.Rlimit{Cur: cpuLimitSoft, Max: cpuLimitHard}); err != nil {
 		return fmt.Errorf("set CPU limit: %w", err)
 	}
 
 	// Virtual memory: 512MB
-	if err := syscall.Setrlimit(syscall.RLIMIT_AS, &syscall.Rlimit{Cur: 512 * 1024 * 1024, Max: 512 * 1024 * 1024}); err != nil {
+	if err := syscall.Setrlimit(syscall.RLIMIT_AS, &syscall.Rlimit{Cur: uint64(memLimitMB) * 1024 * 1024, Max: uint64(memLimitMB) * 1024 * 1024}); err != nil {
 		return fmt.Errorf("set memory limit: %w", err)
 	}
 
 	// Max file size: 10MB
-	if err := syscall.Setrlimit(syscall.RLIMIT_FSIZE, &syscall.Rlimit{Cur: 10 * 1024 * 1024, Max: 10 * 1024 * 1024}); err != nil {
+	if err := syscall.Setrlimit(syscall.RLIMIT_FSIZE, &syscall.Rlimit{Cur: uint64(fileSizeLimitMB) * 1024 * 1024, Max: uint64(fileSizeLimitMB) * 1024 * 1024}); err != nil {
 		return fmt.Errorf("set file size limit: %w", err)
 	}
 
 	// Max open file descriptors: 64
-	if err := syscall.Setrlimit(syscall.RLIMIT_NOFILE, &syscall.Rlimit{Cur: 64, Max: 64}); err != nil {
+	if err := syscall.Setrlimit(syscall.RLIMIT_NOFILE, &syscall.Rlimit{Cur: uint64(maxOpenFiles), Max: uint64(maxOpenFiles)}); err != nil {
 		return fmt.Errorf("set nofile limit: %w", err)
 	}
 
@@ -185,8 +194,6 @@ func vsockListen(port uint32) (net.Listener, error) {
 	return ln, nil
 }
 
-// ── Boot Sequence ─────────────────────────────────────────────────────────────
-
 func mountTaskDisk() error {
 	if err := os.MkdirAll(taskMount, 0755); err != nil {
 		return err
@@ -231,8 +238,6 @@ func signalReady() error {
 	_, err = fmt.Fprintln(conn, "READY")
 	return err
 }
-
-// ── Command Server ────────────────────────────────────────────────────────────
 
 // serveOne accepts a single command from the host, processes it, and returns.
 func serveOne() error {
@@ -280,12 +285,29 @@ func handleConn(conn net.Conn) error {
 		return fmt.Errorf("invalid command JSON: %w", err)
 	}
 
+	// Validate input to prevent malicious content
+	if cmd.SubmissionID == "" {
+		return fmt.Errorf("submission_id cannot be empty")
+	}
+	if len(cmd.SubmissionID) > 100 {
+		return fmt.Errorf("submission_id too long (max 100 chars)")
+	}
+	// Only allow alphanumeric characters, hyphens, and underscores
+	for _, r := range cmd.SubmissionID {
+		if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_') {
+			return fmt.Errorf("submission_id contains invalid characters")
+		}
+	}
+
 	logf("executing command: type=%s submission=%s", cmd.Type, cmd.SubmissionID)
 
 	switch cmd.Type {
 	case "RUN":
 		result := runVerifier(cmd.SubmissionID)
-		out, _ := json.Marshal(result)
+		out, err := json.Marshal(result)
+		if err != nil {
+			return fmt.Errorf("marshaling result: %w", err)
+		}
 		out = append(out, '\n')
 		if _, err := conn.Write(out); err != nil {
 			return fmt.Errorf("writing result: %w", err)
@@ -299,8 +321,6 @@ func handleConn(conn net.Conn) error {
 	}
 	return nil
 }
-
-// ── Verifier Execution ────────────────────────────────────────────────────────
 
 func runVerifier(submissionID string) *Result {
 	result := &Result{SubmissionID: submissionID}
@@ -326,7 +346,7 @@ func runVerifier(submissionID string) *Result {
 		Pdeathsig: syscall.SIGKILL, // child dies if parent dies
 	}
 
-	// Set resource limits using the newer interface
+	// Set resource limits - these will be inherited by child process
 	if err := setResourceLimits(); err != nil {
 		logf("failed to set resource limits: %v", err)
 	}
@@ -338,11 +358,11 @@ func runVerifier(submissionID string) *Result {
 	cmd.Stderr = &stderrBuf
 
 	// Wall-clock timeout kills the process group if Python hangs
-	const wallTimeout = 25 * time.Second
-	timer := time.AfterFunc(wallTimeout, func() {
+	var timedOut int32
+	timer := time.AfterFunc(wallTimeoutSec*time.Second, func() {
 		if cmd.Process != nil {
 			syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-			result.TimedOut = true
+			atomic.StoreInt32(&timedOut, 1)
 		}
 	})
 	defer timer.Stop()
@@ -352,6 +372,7 @@ func runVerifier(submissionID string) *Result {
 	result.ElapsedMs = time.Since(start).Milliseconds()
 	result.Stdout = stdoutBuf.String()
 	result.Stderr = stderrBuf.String()
+	result.TimedOut = atomic.LoadInt32(&timedOut) == 1
 
 	if runErr != nil {
 		if exitErr, ok := runErr.(*exec.ExitError); ok {
@@ -397,8 +418,6 @@ func clamp(v, lo, hi float64) float64 {
 	}
 	return v
 }
-
-// ── Utilities ─────────────────────────────────────────────────────────────────
 
 // cappedBuffer is a write-only buffer that silently discards writes after limit bytes.
 type cappedBuffer struct {
