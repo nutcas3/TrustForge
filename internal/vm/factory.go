@@ -5,6 +5,7 @@ package vm
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sync"
 	"time"
@@ -19,9 +20,10 @@ import (
 
 // Factory creates and manages Firecracker MicroVM instances
 type Factory struct {
-	cfg    config.FirecrackerConfig
-	logger *logrus.Logger
-	mu     sync.RWMutex
+	cfg          config.FirecrackerConfig
+	logger       *logrus.Logger
+	mu           sync.RWMutex
+	maxWarmSnaps int
 	// warmSnapshots is the pool of pre-booted snapshots ready for instant-resume
 	warmSnapshots []*tfmodels.VMSnapshot
 }
@@ -29,8 +31,9 @@ type Factory struct {
 // NewFactory initializes the VM Factory
 func NewFactory(cfg config.FirecrackerConfig, logger *logrus.Logger) *Factory {
 	return &Factory{
-		cfg:    cfg,
-		logger: logger,
+		cfg:          cfg,
+		logger:       logger,
+		maxWarmSnaps: 10, // Default limit to prevent memory leaks
 	}
 }
 
@@ -110,6 +113,21 @@ func (f *Factory) WarmUpSnapshot(ctx context.Context) (*tfmodels.VMSnapshot, err
 	}
 
 	f.mu.Lock()
+	// Cleanup old snapshots if we're at the limit
+	if len(f.warmSnapshots) >= f.maxWarmSnaps {
+		// Remove oldest snapshot (FIFO)
+		oldSnap := f.warmSnapshots[0]
+		f.warmSnapshots = f.warmSnapshots[1:]
+
+		// Clean up snapshot files (ignore errors, they're just cleanup)
+		if err := os.Remove(oldSnap.MemFilePath); err != nil {
+			logger.WithError(err).WithField("old_snap_id", oldSnap.ID).Warn("failed to remove old memory file")
+		}
+		if err := os.Remove(oldSnap.SnapFilePath); err != nil {
+			logger.WithError(err).WithField("old_snap_id", oldSnap.ID).Warn("failed to remove old snapshot file")
+		}
+		logger.WithField("old_snap_id", oldSnap.ID).Info("removed old warm snapshot")
+	}
 	f.warmSnapshots = append(f.warmSnapshots, snap)
 	f.mu.Unlock()
 
