@@ -89,8 +89,7 @@ func (f *Factory) WarmUpSnapshot(ctx context.Context) (*tfmodels.VMSnapshot, err
 	}
 
 	// Take the memory + microvm snapshot
-	snapshotType := "Full"
-	err = machine.CreateSnapshot(ctx, memFile, snapFile, firecracker.WithSnapshotType(snapshotType))
+	err = machine.CreateSnapshot(ctx, memFile, snapFile)
 	if err != nil {
 		machine.StopVMM()
 		return nil, fmt.Errorf("creating snapshot: %w", err)
@@ -253,7 +252,7 @@ func (f *Factory) buildResumeConfig(
 	cfg := f.buildBaseConfig(vmID, socketPath, taskDiskPath)
 
 	// Override with snapshot resume parameters
-	cfg.Snapshot = firecracker.Snapshot{
+	cfg.Snapshot = firecracker.SnapshotConfig{
 		MemFilePath:  snap.MemFilePath,
 		SnapshotPath: snap.SnapFilePath,
 	}
