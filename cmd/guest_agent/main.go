@@ -434,6 +434,10 @@ func logf(format string, args ...any) {
 func poweroff(code int) {
 	logf("powering off (exit code %d)", code)
 	// LINUX_REBOOT_CMD_POWER_OFF = 0x4321FEDC
-	syscall.Reboot(syscall.LINUX_REBOOT_CMD_POWER_OFF)
+	// Use raw syscall since Go's syscall.Reboot may not be available
+	_, _, errno := syscall.Syscall(syscall.SYS_REBOOT, 0, 0, 0x4321FEDC)
+	if errno != 0 {
+		logf("reboot syscall failed: %v", errno)
+	}
 	os.Exit(code) // fallback if reboot fails
 }
