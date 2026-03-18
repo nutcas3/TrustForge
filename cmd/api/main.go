@@ -72,7 +72,6 @@ func main() {
 		logger,
 	)
 
-	// ── Worker Pool ─────────────────────────────────────────────────────────
 	poolErrCh := make(chan error, 1)
 	go func() { poolErrCh <- pool.Run(ctx) }()
 
