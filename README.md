@@ -6,6 +6,32 @@ TrustForge is a Go-based MicroVM factory for evaluating untrusted contributor ve
 
 ---
 
+## Code Organization & Architecture
+
+TrustForge follows Go best practices with **package-by-feature** organization and **single responsibility principle**. The codebase has been comprehensively refactored to improve maintainability, testability, and code organization.
+
+### Key Architectural Principles
+
+- **Single Responsibility**: Each module has one clear purpose
+- **Interface-Driven Design**: Clear interfaces for testability and modularity
+- **Package by Feature**: Related functionality grouped together
+- **Separation of Concerns**: Clear boundaries between different subsystems
+
+### Refactoring Results
+
+| Component | Before | After | Reduction |
+|-----------|--------|-------|-----------|
+| Guest Agent | 513 lines | 47 lines | **91%** |
+| Worker Pool | 320 lines | 127 lines | **60%** |
+| VM Factory | 307 lines | 115 lines | **63%** |
+| DB Repository | 319 lines | 35 lines | **89%** |
+
+**Average reduction: 76%** across major components with improved maintainability and testability.
+
+For detailed refactoring documentation, see `REFACTORING_SUMMARY.md`.
+
+---
+
 ## Architecture
 
 ```
@@ -57,20 +83,52 @@ trustforge/
 │   ├── api/              # REST + gRPC API server entrypoint
 │   └── guest_agent/      # Guest binary (runs inside the VM)
 ├── internal/
+│   ├── db/               # Database operations and migrations
+│   │   ├── pool.go       # Connection pool management
+│   │   ├── migrations.go # Schema migrations
+│   │   ├── submissions.go # CRUD operations
+│   │   └── stats.go      # Statistics queries
 │   ├── fs/               # Dynamic ext4 task disk creation
 │   ├── vm/               # Firecracker MicroVM factory + snapshots
-│   ├── vsock/            # Host↔Guest vsock communication
+│   │   ├── factory.go    # Main factory interface
+│   │   ├── types.go      # Core interfaces and types
+│   │   ├── snapshot/     # Snapshot lifecycle management
+│   │   ├── config/       # VM configuration building
+│   │   └── lifecycle/    # VM lifecycle operations
 │   ├── llm/              # Claude-based red-team analysis
 │   ├── scoring/          # Trust decision engine
 │   └── worker/           # Concurrent VM lifecycle pool
+│       ├── pool.go       # Core pool orchestration
+│       ├── job.go        # Job types and constants
+│       ├── processor/    # Job processing pipeline
+│       ├── metrics/      # Worker metrics tracking
+│       └── scheduler/    # Snapshot & worker management
+├── internal/guestagent/  # Guest agent modular components
+│   ├── mount.go          # Disk mounting utilities
+│   ├── poweroff.go       # System shutdown utilities
+│   ├── vsock/            # Host↔Guest vsock communication
+│   │   ├── client.go     # Client signaling
+│   │   ├── transport.go  # Low-level vsock operations
+│   │   └── types.go      # Constants and types
+│   ├── server/           # Command processing
+│   │   ├── handler.go    # Connection handling
+│   │   ├── validation.go # Input validation
+│   │   └── ratelimit.go  # Rate limiting
+│   └── executor/         # Verification execution
+│       ├── verifier.go   # Verifier execution logic
+│       ├── result.go     # Result processing
+│       └── limits.go     # Resource limit management
 ├── pkg/
 │   ├── models/           # Core domain types
-│   └── config/           # Configuration management
+│   ├── config/           # Configuration management
+│   ├── constants/        # Application-wide constants
+│   └── errors/           # Custom error types and helpers
 ├── scripts/
 │   └── build_base_image.sh  # Builds the Alpine base.ext4
 ├── config.yaml           # Default configuration
 ├── Dockerfile
-└── Makefile
+├── Makefile
+└── REFACTORING_SUMMARY.md # Detailed refactoring documentation
 ```
 
 ---
@@ -99,10 +157,40 @@ PENDING → SANDBOXING → RUNNING → RED_TEAM → TRUSTED / REJECTED
 |---|---|---|
 | Ingestion | `cmd/api` | Accepts verifier + model output via REST POST |
 | Sandbox Prep | `internal/fs` | Creates 10MB task.ext4 with verifier.py + output.txt |
-| Execution | `internal/vm` | Resumes Firecracker from warm snapshot (<5ms) |
-| Vsock Comms | `internal/vsock` | Sends `RUN` command; receives `EvaluationResult` JSON |
+| Execution | `internal/vm/factory` | Resumes Firecracker from warm snapshot (<5ms) |
+| Vsock Comms | `internal/guestagent/vsock` | Sends `RUN` command; receives `EvaluationResult` JSON |
 | Red-Team | `internal/llm` | Claude analyzes for reward hacking patterns |
 | Scoring | `internal/scoring` | All gates must pass to reach TRUSTED status |
+
+---
+
+## Guest Agent Architecture
+
+The guest agent runs inside each Firecracker VM and has been refactored into focused modules:
+
+```
+internal/guestagent/
+├── mount.go          # Disk mounting utilities (37 lines)
+├── poweroff.go       # System shutdown utilities (30 lines)
+├── vsock/            # Host↔Guest communication
+│   ├── client.go     # Client signaling (31 lines)
+│   ├── transport.go  # Low-level vsock operations (83 lines)
+│   └── types.go      # Constants and types (19 lines)
+├── server/           # Command processing
+│   ├── handler.go    # Connection handling (102 lines)
+│   ├── validation.go # Input validation (38 lines)
+│   └── ratelimit.go  # Rate limiting (41 lines)
+└── executor/         # Verification execution
+    ├── verifier.go   # Verifier execution logic (121 lines)
+    ├── result.go     # Result processing (58 lines)
+    └── limits.go     # Resource limit management (41 lines)
+```
+
+**Benefits:**
+- **91% reduction** in main.go (513 → 47 lines)
+- Single responsibility per module
+- Easy to test individual components
+- Clear separation of concerns
 
 ---
 
@@ -199,6 +287,28 @@ curl http://localhost:8080/v1/health
 | `firecracker.execution_timeout` | 30s | Max wall-clock time per eval |
 | `llm.risk_threshold` | 0.70 | Reject above this red-team score |
 | `storage.task_disk_size` | 10MB | Ephemeral task disk size |
+
+---
+
+## Shared Utilities
+
+The `pkg/` directory contains reusable components across the codebase:
+
+```
+pkg/
+├── constants/        # Application-wide constants (68 lines)
+│   └── constants.go  # VM limits, timeouts, vsock ports, etc.
+├── errors/           # Custom error types (82 lines)
+│   └── errors.go     # Structured error handling with helpers
+├── models/           # Core domain types
+└── config/           # Configuration management
+```
+
+**Benefits:**
+- Centralized constants management
+- Consistent error handling with type safety
+- Reusable across all packages
+- Easy to extend and maintain
 
 ---
 

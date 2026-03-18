@@ -14,7 +14,7 @@ func SignalReady() error {
 		err  error
 	)
 	// Retry — host listener may not be ready yet when the VM boots
-	for i := 0; i < 20; i++ {
+	for range 20 {
 		conn, err = Dial(VMAddrCIDHost, ReadyPort)
 		if err == nil {
 			break

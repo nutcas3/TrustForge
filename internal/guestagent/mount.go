@@ -19,7 +19,7 @@ func MountTaskDisk() error {
 		return err
 	}
 	// Wait up to 1s for the kernel to expose /dev/vdb
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		if _, err := os.Stat(TaskDevice); err == nil {
 			break
 		}
