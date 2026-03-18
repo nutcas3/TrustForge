@@ -30,7 +30,7 @@ func Dial(cid, port uint32) (net.Conn, error) {
 	)
 	if errno != 0 {
 		syscall.Close(fd)
-		return nil, fmt.Errorf("connect(vsock cid=%d port=%d): %w", cid, errno)
+		return nil, fmt.Errorf("connect(vsock cid=%d port=%d): %v", cid, port, errno)
 	}
 
 	// Wrap the raw fd as a net.Conn using os.File
